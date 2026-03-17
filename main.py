@@ -1,35 +1,39 @@
 import os
 from dotenv import load_dotenv
-load_dotenv()  # ده هيقرأ ملف .env تلقائيًا
+load_dotenv()  # ده هيقرأ ملف .env لو موجود محليًا
+
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai
+import google.generativeai as genai
 from typing import List
 import shutil
 
 app = FastAPI(title="🧬 Dr. GeneX API")
 
-# CORS عشان تفتحي من الفرونت لو عندك
+# CORS عشان Flutter أو أي frontend يقدر يتصل
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],           # غيريه لاحقًا للـ domains الحقيقية لو عايزة أمان أكتر
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# قراءة الـ API Key من المتغيرات البيئية فقط
+# قراءة الـ API Key من الـ environment variables (مهم جدًا في Railway)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY is missing! Set it in environment variables.")
+    raise ValueError("GEMINI_API_KEY is missing! Set it in Railway Variables.")
 
-# تهيئة الـ client مرة واحدة
-client = genai.Client(api_key=GEMINI_API_KEY)
+# تهيئة Gemini مرة واحدة
+genai.configure(api_key=GEMINI_API_KEY)
 
-# الذاكرة (ستستمر طالما السيرفر شغال)
+# استخدام GenerativeModel (الطريقة الصحيحة والموصى بها)
+model = genai.GenerativeModel("gemini-2.5-flash")
+
+# الذاكرة المؤقتة (ستستمر طالما السيرفر شغال بدون إعادة تشغيل)
 chat_history = []
 
-# مجلد الرفع (اختياري)
+# مجلد حفظ الملفات المرفوعة
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -42,17 +46,16 @@ async def root():
 @app.post("/chat")
 async def chat(user_input: str):
     global chat_history
-
-    # حفظ الرسالة الجديدة
+    
+    # حفظ رسالة المستخدم
     chat_history.append({"role": "user", "content": user_input})
-
-    # آخر 8 رسائل فقط (context window صغير)
+    
+    # آخر 8 رسائل فقط عشان الـ context ما يبقاش كبير جدًا
     recent_history = chat_history[-8:]
-
     history_text = "\n".join(
         f"{msg['role']}: {msg['content']}" for msg in recent_history
     )
-
+    
     prompt = f"""أنت دكتور جين إكس، كوتش جيني ودود جدًا.
 رد بالعامية المصرية لو اليوزر كتب عامية، فصحى لو فصحى، إنجليزي لو إنجليزي.
 استخدم إيموجي طبيعي.
@@ -60,25 +63,33 @@ async def chat(user_input: str):
 ممنوع تشخيص طبي أبدًا، دايمًا قول استشر طبيب.
 الذاكرة السابقة:
 {history_text}
-
 السؤال الجديد: {user_input}"""
 
     try:
-        response = client.models.generate_content(
-            model="models/gemini-1.5-flash-002",   # ← أحدث نسخة مستقرة في 2026
+        response = model.generate_content(
             contents=[{"role": "user", "parts": [{"text": prompt}]}]
         )
-
+        
+        # التأكد من وجود رد صالح
+        if not response.candidates or not response.candidates[0].content.parts:
+            return {"error": "لم يتم الحصول على رد صالح من النموذج"}
+        
         reply = response.candidates[0].content.parts[0].text.strip()
+        
+        # حفظ رد النموذج في الـ history
         chat_history.append({"role": "model", "content": reply})
-
+        
         return {
             "reply": reply,
             "history_length": len(chat_history)
         }
-
+    
     except Exception as e:
-        return {"error": str(e)}
+        error_msg = str(e)
+        # لو الخطأ بسبب النموذج، ممكن نرجع رسالة واضحة
+        if "not found" in error_msg.lower() or "not supported" in error_msg.lower():
+            return {"error": "النموذج غير متاح حاليًا، جرب نموذج آخر أو تحقق من الـ API Key"}
+        return {"error": f"خطأ في الاتصال بـ Gemini: {error_msg}"}
 
 
 @app.post("/upload")
